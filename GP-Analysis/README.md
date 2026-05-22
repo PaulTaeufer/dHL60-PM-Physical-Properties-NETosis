@@ -1,4 +1,4 @@
-TEST TO SEE GP Value Analysis Pipeline for Fluorescence Microscopy (CZI files)
+GP Value Analysis Pipeline for Fluorescence Microscopy (CZI files)
 ===================================================================
 Calculates Generalized Polarization (GP) values for membrane-stained cells.
 
