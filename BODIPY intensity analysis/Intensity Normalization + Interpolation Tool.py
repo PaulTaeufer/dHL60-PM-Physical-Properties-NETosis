@@ -10,7 +10,7 @@ os.chdir(script_dir)
 
 # Automatically find the Excel file in the current folder
 for file in os.listdir():
-    if file.endswith(".xlsx") and "IM_Mask-Cholesterol-MeanInt_data" in file:
+    if file.endswith(".xlsx") and "20mM_20250324_Mask-Cholesterol-MeanInt_data" in file:
         file_path = file
         break
 else:
@@ -63,127 +63,74 @@ for i in range(0, df.shape[1] - 2, 3):
 # ── INTERPOLATION ──────────────────────────────────────────────────────────────
 
 if do_interpolation:
-    interp_df_total = pd.DataFrame()
+    state_blocks = []
 
-    for i in range(0, df.shape[1] - 2, 3):
-        state_col     = df.columns[i + 1]
-        intensity_col = df.columns[i + 2]
-        cell_name     = intensity_col
+    # Get unique states once from the full dataset
+    all_state_cols = [df.columns[i + 1] for i in range(0, df.shape[1] - 2, 3)]
+    states_present_all = sorted(set(
+        int(v)
+        for col in all_state_cols
+        for v in df[col].dropna().unique()
+    ))
 
-        norm_col  = f"{cell_name} (norm@S={reference_state})"
-        state_col_norm = f"State_{cell_name}"
+    for k in states_present_all:
+        block = pd.DataFrame({"State": [int(k)] * interpolation_points})
 
-        # Skip if normalization failed for this cell
-        if norm_col not in normalized_df.columns:
-            continue
-        if normalized_df[norm_col].isna().all():
-            continue
+        for i in range(0, df.shape[1] - 2, 3):
+            state_col      = df.columns[i + 1]
+            intensity_col  = df.columns[i + 2]
+            cell_name      = intensity_col
+            norm_col       = f"{cell_name} (norm@S={reference_state})"
+            state_col_norm = f"State_{cell_name}"
 
-        cell_interp_df = pd.DataFrame()
+            if norm_col not in normalized_df.columns or normalized_df[norm_col].isna().all():
+                block[norm_col] = np.nan
+                continue
 
-        states_present = normalized_df[state_col_norm].dropna().unique()
-
-        for k in sorted(states_present):
             mask      = normalized_df[state_col_norm] == k
             norm_vals = normalized_df.loc[mask, norm_col].dropna().reset_index(drop=True)
 
             if len(norm_vals) >= 2:
-                interp_func = interp1d(
-                    range(len(norm_vals)),
-                    norm_vals,
-                    kind='linear'
-                )
+                interp_func = interp1d(range(len(norm_vals)), norm_vals, kind='linear')
                 new_x = np.linspace(0, len(norm_vals) - 1, interpolation_points)
                 new_y = interp_func(new_x)
             elif len(norm_vals) == 1:
-                # Only one point — fill all slots with that value
                 new_y = np.full(interpolation_points, norm_vals.iloc[0])
             else:
                 new_y = np.full(interpolation_points, np.nan)
 
-            chunk = pd.DataFrame({
-                f"State_{cell_name}":                       [int(k)] * interpolation_points,
-                f"InterpIndex_{cell_name}":                 list(range(interpolation_points)),
-                f"{cell_name} (norm@S={reference_state})": new_y
-            })
-            cell_interp_df = pd.concat([cell_interp_df, chunk], ignore_index=True)
+            block[norm_col] = new_y
 
-        # Merge this cell's interpolated data side-by-side
-        if interp_df_total.empty:
-            interp_df_total = cell_interp_df
-        else:
-            interp_df_total = pd.concat(
-                [interp_df_total.reset_index(drop=True),
-                 cell_interp_df.reset_index(drop=True)],
-                axis=1
-            )
+        state_blocks.append(block)
 
-# ── MEAN TRAJECTORY ───────────────────────────────────────────────────────────
+    # Stack states vertically — should be n_states * interpolation_points rows total
+    interp_df_total = pd.concat(state_blocks, ignore_index=True)
+    print(f"Interpolation shape: {interp_df_total.shape} — expected ({len(states_present_all) * interpolation_points}, {1 + df.shape[1] // 3})")
 
-if do_interpolation and not interp_df_total.empty:
-    norm_suffix = f"(norm@S={reference_state})"
-
-    # Collect all value columns grouped by state
-    states_all = sorted(set(
-        int(v)
-        for col in interp_df_total.columns
-        if col.startswith("State_")
-        for v in interp_df_total[col].dropna().unique()
-    ))
-
+# ── MEAN TRAJECTORY ───────────────────────────────────────────────────────
     mean_df = pd.DataFrame()
 
-    for k in states_all:
-        # Find all normalized value columns for this state
-        # For each cell, grab rows where its State column == k
-        state_values = []
-        for col in interp_df_total.columns:
-            if not col.startswith("State_"):
-                continue
-            cell_id   = col[len("State_"):]
-            val_col   = f"{cell_id} {norm_suffix}"
-            if val_col not in interp_df_total.columns:
-                continue
-            mask = interp_df_total[col] == k
-            vals = interp_df_total.loc[mask, val_col].reset_index(drop=True)
-            if len(vals) == interpolation_points:
-                state_values.append(vals)
-
-        if state_values:
-            stacked   = pd.concat(state_values, axis=1)
-            mean_vals = stacked.mean(axis=1)
-            sem_vals  = stacked.sem(axis=1)
-        else:
-            mean_vals = pd.Series([np.nan] * interpolation_points)
-            sem_vals  = pd.Series([np.nan] * interpolation_points)
+    for k in states_present_all:
+        # Get all cell value columns for this state's rows
+        mask = interp_df_total["State"] == k
+        val_cols = [col for col in interp_df_total.columns if col != "State"]
+        
+        stacked   = interp_df_total.loc[mask, val_cols].reset_index(drop=True)
+        mean_vals = stacked.mean(axis=1)
+        sem_vals  = stacked.sem(axis=1)
 
         chunk = pd.DataFrame({
-            "State":              [int(k)] * interpolation_points,
-            "InterpIndex":        list(range(interpolation_points)),
-            "Mean (norm)":        mean_vals.values,
-            "SEM (norm)":         sem_vals.values,
+            "State":       [int(k)] * interpolation_points,
+            "Mean (norm)": mean_vals.values,
+            "SEM (norm)":  sem_vals.values,
         })
         mean_df = pd.concat([mean_df, chunk], ignore_index=True)
 
-    # Separate mean from per-cell data by two empty columns
-    spacer = pd.DataFrame({" ": [None] * len(interp_df_total),
-                           "  ": [None] * len(interp_df_total)})
-    # Pad mean_df to same length as interp_df_total if needed
-    if len(mean_df) < len(interp_df_total):
-        pad = pd.DataFrame(
-            np.nan,
-            index=range(len(interp_df_total) - len(mean_df)),
-            columns=mean_df.columns
-        )
-        mean_df = pd.concat([mean_df, pad], ignore_index=True)
-    elif len(mean_df) > len(interp_df_total):
-        spacer = pd.DataFrame({" ": [None] * len(mean_df),
-                               "  ": [None] * len(mean_df)})
-        interp_df_total = pd.concat([
-            interp_df_total,
-            pd.DataFrame(np.nan, index=range(len(mean_df) - len(interp_df_total)),
-                         columns=interp_df_total.columns)
-        ], ignore_index=True)
+    # Add two spacer columns then mean trajectory
+    spacer = pd.DataFrame(
+        {" ": [None] * len(interp_df_total),
+         "  ": [None] * len(interp_df_total)}
+    )
 
     interp_df_total = pd.concat(
         [interp_df_total.reset_index(drop=True),
